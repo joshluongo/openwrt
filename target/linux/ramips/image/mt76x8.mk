@@ -604,6 +604,22 @@ define Device/mercury_mac1200r-v2
 endef
 TARGET_DEVICES += mercury_mac1200r-v2
 
+define Device/mercusys_mb118-4g-v1
+$(Device/tplink-v2)
+  IMAGE_SIZE := 6720k
+  DEVICE_VENDOR := MERCUSYS
+  DEVICE_MODEL := MB118-4G
+  DEVICE_VARIANT := v1
+  DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial-option kmod-usb-net-cdc-ether \
+	kmod-usb-net-rndis
+  TPLINK_FLASHLAYOUT := 8Mmtk
+  # No tftp-recovery image: the stock bootloader recovery writes a fixed
+  # 0x7a0000 bytes at 0x20000, which would overwrite romfile/radio (MAC and
+  # Wi-Fi calibration) with blank data.
+  IMAGES := sysupgrade.bin
+endef
+TARGET_DEVICES += mercusys_mb118-4g-v1
+
 define Device/mercusys_mb130-4g-v1
 $(Device/tplink-v2)
   IMAGE_SIZE := 14912k

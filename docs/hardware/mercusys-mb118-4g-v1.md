@@ -141,6 +141,13 @@ be committed or shared. Findings:
   rootfs at offset `0x130000` with length `0x534000`. OpenWrt's `tplink-v2`
   header is big-endian apart from the swapped (`-e`) load and entry addresses.
 
+A root shell on the running stock firmware later confirmed:
+- `/proc/mtd` matches the nine-partition table.
+- The MD5 of each of `mtdblock3`–`mtdblock8` equals the corresponding dump
+  file, so the per-unit region was read correctly and is current.
+- The SoC is an MT7628 with `MemTotal` 61,848 kB (64 MiB RAM).
+- The LAN side uses VLANs 2–5 on `eth0`, bridged from `eth0.2`.
+
 The bootloader's boot path (`bootm 0xbc020000`) was disassembled from the dump.
 It always decompresses LZMA from header offset `0x200`. It reads only
 `kernel_la` (`0x68`), `kernel_ep` (`0x6c`) and `kernel_len` (`0x78`), as
@@ -211,8 +218,8 @@ assignments differ materially from `mt7628an_mercusys_mb130-4g-v1.dts`.
 ## Information needed before implementing a flashable port
 
 Items 2 and 3 and most of 4 are now answered by the flash dump and the kernel
-analysis above. Still open: item 1, the Ethernet switch port, the OpenWrt
-modem interface name, and item 5.
+analysis above, and the modem's USB identity by the live system. Still open:
+item 1 (a boot log) and item 5. The Ethernet switch port is port 4.
 
 1. A complete cold-boot log: actual SoC, RAM size, SPI flash identity, live MTD
    boundaries, switch/PHY setup and modem USB enumeration.
@@ -329,9 +336,9 @@ A first-draft `ramips/mt76x8` target was added:
   (`IMAGE_SIZE := 6720k`, `TPLINK_FLASHLAYOUT := 8Mmtk`).
 - `mt76x8/base-files/etc/board.d/02_network` — single `eth0` LAN (switch
   registered with VLANs disabled, as on other single-port mt76x8 boards), LTE
-  as the standard `wan`/`wan6` on `eth1` (DHCP; RNDIS or ECM).
-- `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `eth1`; LAN
-  LED as a switch-link trigger on ports 0–4, since the jack's port is unknown.
+  as the standard `wan`/`wan6` on `wwan0` (DHCP over RNDIS).
+- `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `wwan0`; LAN
+  LED as a switch-link trigger on port 4 (mask `0x10`).
 
 Design choices and their basis:
 
@@ -344,14 +351,18 @@ Design choices and their basis:
   leaves the modem in RNDIS mode (`AT+QCFG="usbnet",3`), so `rndis_host` is the
   driver expected on first boot. `cdc_ether` is kept for ECM mode
   (`"usbnet",1`).
-- **Modem interface named `eth1`**, matching the in-tree MB130-4G, which
-  carries the same EC200A-EL. usbnet names an RNDIS/ECM device `eth*` when the
-  modem reports a globally administered MAC and `usb*` otherwise, so this is
-  unconfirmed for this unit; if it enumerates as `usb0`, change `wan` and the
-  internet LED accordingly.
-- **esw portmap left at the SoC default** (all PHYs active) so the single
-  Ethernet port is reachable on first boot regardless of which physical port
-  it maps to.
+- **Modem interface named `wwan0`.** The live stock system (2026-11-05)
+  shows the modem as USB `2c7c:6005`, bound to `rndis_host` and `option`, with
+  a locally administered MAC on its network interface. In this tree's kernel
+  (6.18), `rndis_host` matches `2c7c:6005` to `asr_rndis_info`, which sets
+  `FLAG_WWAN`, and usbnet always names such devices `wwan%d`. The MB130-4G's
+  `eth1` therefore does not apply while the modem is in RNDIS mode. If the
+  modem is switched to ECM (`"usbnet",1`), `cdc_ether` binds it instead and
+  the name changes.
+- **Ethernet on switch port 4 only** (`mediatek,portdisable = <0x2f>`). On
+  the running stock firmware, `/proc/mt7628/esw_cnt` showed traffic only on
+  port 4. The link register (`0x10110080` = `0xa180a110`) had the port 4 link
+  bit (29) set, with no link on ports 0–3.
 
 Verified so far: file/shell/DTS syntax, layout arithmetic, and name
 consistency across DTS, recipe and board.d; **and a full toolchain image build**
@@ -386,15 +397,16 @@ The images are build-host artifacts and are not committed to the repository.
 2. **GPIO polarity and modem line levels** come from disassembly of the stock
    GPIO driver (see "GPIO findings"). They are expected to be correct, but no
    pin has been observed on hardware.
-3. **Switch port number** for the single Ethernet connector is unknown.
+3. **Switch port** for the single Ethernet connector is port 4, observed on
+   the running stock firmware; untested under OpenWrt.
 4. **Reset button** is GPIO 38, active-low, read by both the stock kernel and
    U-Boot.
 5. **First-flash method:** a per-unit TFTP-recovery image (see "Installation
    method") is the only known path that preserves the unique data. It is
    untested.
-6. **Modem network interface name** is assumed to be `eth1`, as on the MB130.
-   If it enumerates as `usb0`, update `wan` in `02_network` and the internet
-   LED in `01_leds` together.
+6. **Modem network interface name** is `wwan0`, derived from the live USB ID
+   and the kernel's driver table (see "Design choices"). It has not yet been
+   observed under OpenWrt.
 
 ## Installation method
 
@@ -488,7 +500,9 @@ Procedure, derived from the dumped bootloader:
 `config`/`configbak` are restored to their state when the dump was taken.
 That only matters if you later return to stock firmware. This path has not
 been tested on hardware. The dump's integrity check covers only `0x0`–`0x6b0000`;
-the per-unit region relies on the same read method.
+the per-unit region is additionally confirmed by matching per-partition MD5
+sums from the live system. Re-check those sums immediately before flashing,
+in case stock firmware has changed `config` since.
 
 ## Feature acceptance criteria
 

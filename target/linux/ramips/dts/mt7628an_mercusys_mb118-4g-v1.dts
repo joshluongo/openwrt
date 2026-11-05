@@ -240,12 +240,13 @@
 };
 
 /*
- * The MB118-4G exposes a single Ethernet connector. The stock driver's
- * generic link checks (ports 1-4) do not identify which switch port it is
- * wired to, so the esw default from mt7628an.dtsi is left in place (all
- * PHYs active) to keep the port reachable on first boot regardless of
- * wiring. Narrow this once the live port number is known.
+ * The MB118-4G exposes a single Ethernet connector, wired to switch port 4
+ * (the only port with traffic and link on the running stock firmware).
  */
+&esw {
+	mediatek,portdisable = <0x2f>;
+};
+
 &ethernet {
 	nvmem-cells = <&macaddr_romfile_f100 0>;
 	nvmem-cell-names = "mac-address";

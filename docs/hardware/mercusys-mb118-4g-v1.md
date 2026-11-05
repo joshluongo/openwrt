@@ -5,8 +5,10 @@ Recorded: 2026-11-03
 Status: a first-draft target was added to this tree and **now builds cleanly**
 (see "Implemented port" below). It has **not** been booted or flashed on
 hardware. No flash or configuration writes were performed on the device during
-this investigation. An Ethernet-only installation method has not been verified,
-and the first flash remains the single irreversible step.
+this investigation. On 2026-11-05 the owner supplied a full 8 MiB flash dump;
+its findings are under "Full flash dump" and they resolve the per-unit data
+blocker for a TFTP-recovery install (see "Installation method"). That install
+is still untested and remains the single irreversible step.
 
 ## Device identity and live checks
 
@@ -95,8 +97,8 @@ Likewise, a bundled USB driver is not proof that it is bound to the live modem.
 
 The decompressed kernel contains the following nine-entry static partition
 table at offset `0x2bea08`. The SPI initialization code passes that table to
-the MTD partition registration function. These are offline findings, pending
-confirmation against the running device and a complete flash backup.
+the MTD partition registration function. The full flash dump below matches it
+partition for partition.
 
 | Partition | Offset | Size |
 | --- | --- | --- |
@@ -114,6 +116,41 @@ This table spans 8 MiB. The firmware area before `ispconfig` is `0x690000`
 bytes, starting at `0x020000`. Do not substitute the supported MB130-4G's
 16 MiB layout, calibration offsets or image-size limit.
 
+## Full flash dump
+
+The owner supplied nine per-partition files (plus a duplicate of `boot`) that
+concatenate to exactly 8 MiB, with the sizes in the table above. The dump is
+kept privately outside the repository; it contains per-unit data and must not
+be committed or shared. Findings:
+
+- **Integrity:** dump bytes `0x000000`–`0x6b0000` (U-Boot, firmware header,
+  kernel and rootfs) are byte-identical to the matching vendor firmware file
+  above. This validates the read method for the rest of the dump.
+- **`ispconfig`** is entirely `0xff`. **`config`/`configbak`** hold vendor
+  settings. **`userdata`** is a JFFS2 filesystem.
+- **`romfile`** holds the base MAC at `0xf100`. It is globally administered and
+  matches the label MAC. Other non-`0xff` data is at `0xf200`, `0xf500`,
+  `0xf600` and `0xfc00`.
+- **`radio`** holds an MT7628 EEPROM (chip ID `0x7628`) in its first `0x400`
+  bytes, with the remainder `0xff`. It differs from the firmware's bundled
+  default EEPROM in 24 bytes of the first `0x200`, consistent with per-unit
+  calibration. Its own MAC field is the MediaTek default `00:0c:43:…`, so the
+  MAC must come from `romfile`, as the DTS does.
+- **The stock firmware header is little-endian throughout.** It declares
+  `fw_length = 0x6a0000`, a kernel offset/length of `0x200`/`0xf291f`, and a
+  rootfs at offset `0x130000` with length `0x534000`. OpenWrt's `tplink-v2`
+  header is big-endian apart from the swapped (`-e`) load and entry addresses.
+
+The bootloader's boot path (`bootm 0xbc020000`) was disassembled from the dump.
+It always decompresses LZMA from header offset `0x200`. It reads only
+`kernel_la` (`0x68`), `kernel_ep` (`0x6c`) and `kernel_len` (`0x78`), as
+little-endian words, and passes `kernel_len` only as the decompressor's input
+bound. It ignores `kernel_ofs` and `fw_length` and checks no checksum. OpenWrt's
+swapped load/entry addresses therefore decode correctly. Its big-endian
+`kernel_len` decodes as an oversized bound, which is harmless because the LZMA
+stream carries its own size. This is the same mechanism other `tplink-v2`
+MT7628 devices rely on, but it has not been booted on this unit.
+
 ### Recovery discrepancy
 
 The vendor bootloader contains environment defaults `ipaddr=192.168.0.2` and
@@ -123,11 +160,14 @@ The vendor bootloader contains environment defaults `ipaddr=192.168.0.2` and
 tftp 0x80060000 tp_recovery.bin;erase tplink 0x20000 0x7a0000;cp.b 0x80080000 0x20000 0x7a0000
 ```
 
-This is evidence, not an installation instruction. Its destination interval,
-`[0x020000, 0x7c0000)`, overlaps the static kernel table's configuration,
-`romfile`, `radio` and part of `userdata`. It is not safe to prescribe this
-recovery path using a padded OpenWrt image without resolving that discrepancy
-and preserving the device's unique data.
+The dumped bootloader confirms this string and its trigger. At power-up it
+polls GPIO 38 (the reset button, low when pressed) every 100 ms. If the button
+is still held after 50 polls (about 5 s), it runs the recovery command;
+otherwise it boots normally. The destination interval, `[0x020000, 0x7c0000)`,
+overlaps the configuration partitions, `romfile`, `radio` and part of
+`userdata`. A padded OpenWrt image would erase the device's unique data. Only a
+recovery image that writes that data back unchanged is safe (see
+"Installation method").
 
 The bootloader also advertises a distinct "Load system code to SDRAM via TFTP"
 menu option, alongside options that explicitly write flash. Whether and how
@@ -137,32 +177,42 @@ TFTP transport alone does not prove console-free RAM boot is available.
 ## GPIO findings from the vendor kernel
 
 The kernel registers `/proc/tplink/` handlers for modem power, boot mode, DC,
-antenna selection, reset, LEDs and GPIO status. The following GPIO numbers
-come from their control routines, not physical pin testing:
+antenna selection, reset, LEDs and GPIO status. All of them drive a 12-entry
+GPIO table through a common routine at kernel address `0x80133578`, assuming
+the raw kernel's `0x80000000` load base. A periodic timer writes the table's
+states to the pins. The pin-write routine inverts levels only for GPIOs listed
+at `0x80260e50`: `46, 44, 43, 42, 41, 40, 39`, the LEDs. These are offline
+findings from disassembly, not physical pin testing:
 
-| Control | GPIO number(s) |
-| --- | --- |
-| Power LED | 46 |
-| 2.4 GHz WLAN LED | 43 |
-| Internet LED | 42 |
-| Signal indicator, increasing strength | 41, then 40, then 39 |
-| Modem USB power control | 36 |
-| Modem boot control | 3 |
-| Modem DC control | 37 |
-| Modem antenna control | 5 |
-| Modem reset control | 4 |
+| Control | GPIO | Pin level when active / stock steady state |
+| --- | --- | --- |
+| Power LED | 46 | on = high |
+| Internet LED (follows `/proc/tplink/led_internet`) | 44 | on = high |
+| 2.4 GHz WLAN / WPS LED | 43 | on = high |
+| LAN LED (driver link check, switch ports 1–4) | 42 | on = high |
+| Signal indicator, increasing strength | 41, then 40, then 39 | on = high |
+| Reset button (kernel poller and U-Boot) | 38 | pressed = low |
+| Modem USB power control (`usb_power`) | 36 | high; writing 1 pulses low for 1 s |
+| Modem DC control (`usb_dc`) | 37 | high |
+| Modem antenna control (`usb_antenna`) | 5 | high (never changed by userspace) |
+| Modem boot control (`usb_boot`) | 3 | low; high only for modem firmware download |
+| Modem reset control (`usb_reset`) | 4 | low; high asserts reset |
 
-The common GPIO control routine is at kernel address `0x80133578`, assuming
-the raw kernel's `0x80000000` load base. For example, the `usb_power` write
-handler at `0x80133a64` selects GPIO 36 and performs a one-second state
-transition when asked to power the modem. Those abstract states must not be
-treated as verified physical GPIO polarity or a validated OpenWrt power sequence.
+For the modem lines, a userspace value of 1 drives the pin high. The stock
+`libcmm` writes `usb_power` 0 only on its shutdown path, after unloading the
+USB drivers. It pulses `usb_boot`/`usb_reset` only to run the modem
+firmware updater (`qdloader`). The stock `cos` daemon configures the modem
+with `AT+QCFG="usbnet",3` (RNDIS), `AT+QCFG="nat",1` and `AT+QNETDEVCTL`
+auto-dial. The modem retains its USB network mode across reboots.
 
-The reset-button mapping, Ethernet LED behavior, GPIO polarity, pin multiplexing
-and startup states still need validation. GPIO assignments differ materially
-from `mt7628an_mercusys_mb130-4g-v1.dts`.
+GPIO 44 is on the `wled_an` pin, so the DTS muxes that group to GPIO. GPIO
+assignments differ materially from `mt7628an_mercusys_mb130-4g-v1.dts`.
 
 ## Information needed before implementing a flashable port
+
+Items 2 and 3 and most of 4 are now answered by the flash dump and the kernel
+analysis above. Still open: item 1, the Ethernet switch port, the OpenWrt
+modem interface name, and item 5.
 
 1. A complete cold-boot log: actual SoC, RAM size, SPI flash identity, live MTD
    boundaries, switch/PHY setup and modem USB enumeration.
@@ -225,6 +275,12 @@ the temporary interface, and its newly learned IPv6 default route was removed
 to avoid changing the host's default routing. This VLAN setup is not persistent
 across host reboots.
 
+On 2026-11-04 the owner moved the modem to VLAN 5. The VLAN 20 interface was
+removed and replaced with `enp1s0f0.5` using the same address and IPv6
+settings. The modem answered ping and HTTP at `192.168.1.1` through it, with a
+neighbour MAC matching the label's base MAC. The host's default route was
+unchanged.
+
 Repeating the no-file TFTP probe succeeded: the router reported
 `pcIP=192.168.1.225`, and the host received its TFTP read request for
 `conf.json` from `192.168.1.1`. The probe deliberately returned a file-not-found
@@ -273,8 +329,9 @@ A first-draft `ramips/mt76x8` target was added:
   (`IMAGE_SIZE := 6720k`, `TPLINK_FLASHLAYOUT := 8Mmtk`).
 - `mt76x8/base-files/etc/board.d/02_network` — single `eth0` LAN (switch
   registered with VLANs disabled, as on other single-port mt76x8 boards), LTE
-  as the standard `wan`/`wan6` on `eth1` (DHCP, ECM).
-- `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `eth1`.
+  as the standard `wan`/`wan6` on `eth1` (DHCP; RNDIS or ECM).
+- `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `eth1`; LAN
+  LED as a switch-link trigger on ports 0–4, since the jack's port is unknown.
 
 Design choices and their basis:
 
@@ -282,14 +339,16 @@ Design choices and their basis:
   merged into a `tplink,firmware` partition; all vendor partitions kept
   read-only. The region math is exact to 8 MiB.
 - **2.4 GHz only** via the integrated MT7628 WMAC (no PCIe/5 GHz card).
-- **EC200A-EL treated as ECM** (ASR platform, no QMI): DHCP on the modem's
-  network interface, with `option` AT ports for control. Corroborated by the
-  stock firmware bundling `cdc_ether`/`rndis_host` and no QMI driver.
+- **EC200A-EL as a USB Ethernet modem** (ASR platform, no QMI): DHCP on the
+  modem's network interface, with `option` AT ports for control. Stock firmware
+  leaves the modem in RNDIS mode (`AT+QCFG="usbnet",3`), so `rndis_host` is the
+  driver expected on first boot. `cdc_ether` is kept for ECM mode
+  (`"usbnet",1`).
 - **Modem interface named `eth1`**, matching the in-tree MB130-4G, which
-  carries the same EC200A-EL with `kmod-usb-net-cdc-ether`. usbnet names the
-  device `eth*` when the modem reports a globally administered MAC and `usb*`
-  otherwise, so this is unconfirmed for this unit; if it enumerates as `usb0`,
-  change `wan` and the internet LED accordingly.
+  carries the same EC200A-EL. usbnet names an RNDIS/ECM device `eth*` when the
+  modem reports a globally administered MAC and `usb*` otherwise, so this is
+  unconfirmed for this unit; if it enumerates as `usb0`, change `wan` and the
+  internet LED accordingly.
 - **esw portmap left at the SoC default** (all PHYs active) so the single
   Ethernet port is reachable on first boot regardless of which physical port
   it maps to.
@@ -311,31 +370,28 @@ not be flashed.
 The DTS compiled under the kernel, the sysupgrade fits the 6720 KiB firmware
 region, and the image metadata declares `supported_devices: mercusys,mb118-4g-v1`.
 The included driver set is correct for the hardware: `kmod-mt7603` + `kmod-mt76`
-(2.4 GHz WMAC), and `kmod-usb2` / `kmod-usb-net-cdc-ether` /
-`kmod-usb-serial-option` / `kmod-usb-serial-wwan` for the EC200A modem (ECM data
-plus AT control), with `kmod-usb-net-rndis` as a fallback in case the modem
-enumerates in RNDIS mode. **Not** verified: any on-device behaviour (boot, MAC/calibration
-nvmem offsets, GPIO polarity, modem bring-up, Ethernet, Wi-Fi, LTE).
+(2.4 GHz WMAC), and `kmod-usb2` / `kmod-usb-net-rndis` /
+`kmod-usb-net-cdc-ether` / `kmod-usb-serial-option` / `kmod-usb-serial-wwan`
+for the EC200A modem (RNDIS as left by stock, or ECM, plus AT control).
+**Not** verified: any on-device behaviour (boot, modem bring-up, Ethernet,
+Wi-Fi, LTE, LEDs).
 
 The images are build-host artifacts and are not committed to the repository.
 
 ### Assumptions that require on-device confirmation
 
-1. **MAC/EEPROM offsets** (`romfile` `0xf100`, `radio` `0x0`) are carried from
-   the 16 MiB MB130-4G and are unconfirmed for this unit. Wrong offsets mean
-   wrong/zero MAC addresses and uncalibrated Wi-Fi.
-2. **GPIO polarity and the modem power/reset sequence** are from the stock
-   kernel's handlers, not pin testing. The DTS defaults power the modem on and
-   release reset; these may need inverting.
+1. **MAC/EEPROM offsets** (`romfile` `0xf100`, `radio` `0x0`) are confirmed
+   from the flash dump; first boot should still show the label MAC and a
+   calibrated radio.
+2. **GPIO polarity and modem line levels** come from disassembly of the stock
+   GPIO driver (see "GPIO findings"). They are expected to be correct, but no
+   pin has been observed on hardware.
 3. **Switch port number** for the single Ethernet connector is unknown.
-4. **Reset button GPIO** was not found in the stock GPIO handlers. The DTS
-   provisionally declares GPIO38 (active-low, the MB130 mapping) as the reset
-   key; this is unverified, so the failsafe button may not work.
-5. **First-flash method** is unresolved. The stock web UI likely rejects an
-   unsigned image, and the vendor U-Boot TFTP recovery overwrites a region that
-   overlaps `romfile`/`radio`/`userdata` (see "Recovery discrepancy"), which
-   would destroy per-unit MAC and calibration data. A safe install path must be
-   established before flashing, since no UART recovery is available.
+4. **Reset button** is GPIO 38, active-low, read by both the stock kernel and
+   U-Boot.
+5. **First-flash method:** a per-unit TFTP-recovery image (see "Installation
+   method") is the only known path that preserves the unique data. It is
+   untested.
 6. **Modem network interface name** is assumed to be `eth1`, as on the MB130.
    If it enumerates as `usb0`, update `wan` in `02_network` and the internet
    LED in `01_leds` together.
@@ -344,15 +400,18 @@ The images are build-host artifacts and are not committed to the repository.
 
 > **⚠ Do not use the MB130 TFTP-recovery method on the MB118-4G.** On this
 > model it permanently erases the per-unit MAC and Wi-Fi calibration (see
-> below). There is currently no known safe first-flash path.
+> below). The only known safe first-flash path is a per-unit recovery image
+> built from a full flash dump of the same unit (see "Per-unit recovery
+> image").
 >
 > The built `sysupgrade.bin` and `initramfs-kernel.bin` also declare
 > `fw_length = 0x7a0000` in their TP-Link header (inherited from the `8Mmtk`
 > layout), although this device's firmware partition is only `0x690000`.
 > OpenWrt ignores that field, but a stock flasher that trusts it would write
 > into `romfile`/`radio`. Only give these images to a running OpenWrt
-> `sysupgrade` or a verified RAM-only load — never to the stock web UI or the
-> U-Boot menu options that write flash.
+> `sysupgrade`, a verified RAM-only load, or wrap them in the per-unit
+> recovery image — never give them directly to the stock web UI or the U-Boot
+> menu options that write flash.
 
 For reference only, the supported MB130-4G v1 installs with no disassembly via
 its bootloader's TFTP recovery (OpenWrt PR #17819): a `tftp-recovery.bin` is
@@ -385,13 +444,51 @@ and one blocking risk:
   avoids the problem by erasing only its firmware partition has not been
   verified from this tree.
 
-Because the enclosure is water-sealed (no UART to read the real erase size or
-to back up flash), a safe first flash requires resolving this before writing:
-either confirm the live bootloader actually limits the write to the firmware
-region, or obtain verified per-unit contents of every vendor partition in
-`[0x6b0000, 0x7c0000)` so a recovery image can be built that writes them back
-unchanged. Image size alone does not establish preservation. Until then, the first flash is not
-demonstrably non-destructive on this model.
+### Per-unit recovery image (requires your own flash dump)
+
+With a verified dump of the same unit, a recovery image can carry that unit's
+own bytes for `[0x6b0000, 0x7c0000)`. The bootloader then rewrites
+`ispconfig`, `config`, `configbak`, `romfile`, `radio` and the start of
+`userdata` with identical contents. Such an image contains per-unit data, so
+build it locally, never commit or share it, and only flash it on the unit the
+dump came from.
+
+Layout (`0x7c0000` bytes; the bootloader skips the first `0x20000`):
+
+| File offset | Content |
+| --- | --- |
+| `0x000000` | `0x20000` bytes of `0xff` (not written) |
+| `0x020000` | OpenWrt `sysupgrade.bin` with its fwtool metadata trailer removed, as `sysupgrade` would write it |
+| up to `0x6b0000` | `0xff` padding |
+| `0x6b0000` | dump bytes `0x6b0000`–`0x7c0000`, copied verbatim |
+
+```python
+import struct
+dump = open("flash-dump.bin", "rb").read()  # concatenated 8 MiB dump
+fw = open("openwrt-ramips-mt76x8-mercusys_mb118-4g-v1-squashfs-sysupgrade.bin", "rb").read()
+assert len(dump) == 0x800000
+while fw[-16:-12] == b"FWx0":  # strip fwtool trailers
+    fw = fw[:-struct.unpack(">I", fw[-4:])[0]]
+assert fw.endswith(b"\xde\xad\xc0\xde") and len(fw) <= 0x690000
+img = b"\xff" * 0x20000 + fw + b"\xff" * (0x690000 - len(fw)) + dump[0x6b0000:0x7c0000]
+assert len(img) == 0x7c0000 and img[0x6b0000:] == dump[0x6b0000:0x7c0000]
+open("tp_recovery.bin", "wb").write(img)
+```
+
+Procedure, derived from the dumped bootloader:
+
+1. Connect a PC directly to the Ethernet port and give it `192.168.0.225/24`.
+   The bootloader uses `192.168.0.2`, not the MB130's `192.168.1.x`.
+2. Serve `tp_recovery.bin` from a TFTP server on that address.
+3. Power off, hold Reset, power on, and keep holding for more than 5 s until
+   the TFTP transfer starts.
+4. Wait for the erase and write of `0x7a0000` bytes to finish and the device
+   to reboot. OpenWrt then answers at `192.168.1.1`.
+
+`config`/`configbak` are restored to their state when the dump was taken.
+That only matters if you later return to stock firmware. This path has not
+been tested on hardware. The dump's integrity check covers only `0x0`–`0x6b0000`;
+the per-unit region relies on the same read method.
 
 ## Feature acceptance criteria
 

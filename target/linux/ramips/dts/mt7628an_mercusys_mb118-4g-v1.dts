@@ -23,10 +23,10 @@
 	};
 
 	/*
-	 * The external reset button is required by the bootloader's TFTP
-	 * recovery (hold at power-up). Its GPIO was not exposed by the stock
-	 * /proc/tplink handlers; GPIO 38 (wdt pin) is the MB130-4G mapping and
-	 * a strong candidate here, but it is UNCONFIRMED on this unit.
+	 * GPIO and polarity data below are taken from the stock kernel's
+	 * tplink LED/GPIO driver: it polls GPIO 38 for the reset button
+	 * (pressed reads low), and inverts only the LED GPIOs (46, 44, 43, 42,
+	 * 41, 40, 39) so that "on" drives the pin high.
 	 */
 	keys {
 		compatible = "gpio-keys";
@@ -44,20 +44,26 @@
 		led_power: power {
 			function = LED_FUNCTION_POWER;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio 46 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio 46 GPIO_ACTIVE_HIGH>;
 		};
 
 		wlan2g {
 			function = LED_FUNCTION_WLAN_2GHZ;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio 43 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio 43 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "phy0tpt";
+		};
+
+		lan {
+			function = LED_FUNCTION_LAN;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 42 GPIO_ACTIVE_HIGH>;
 		};
 
 		internet {
 			function = LED_FUNCTION_WAN_ONLINE;
 			color = <LED_COLOR_ID_GREEN>;
-			gpios = <&gpio 42 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio 44 GPIO_ACTIVE_HIGH>;
 		};
 
 		/*
@@ -66,26 +72,27 @@
 		 */
 		signal1 {
 			label = "green:signal1";
-			gpios = <&gpio 41 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio 41 GPIO_ACTIVE_HIGH>;
 		};
 
 		signal2 {
 			label = "green:signal2";
-			gpios = <&gpio 40 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio 40 GPIO_ACTIVE_HIGH>;
 		};
 
 		signal3 {
 			label = "green:signal3";
-			gpios = <&gpio 39 GPIO_ACTIVE_LOW>;
+			gpios = <&gpio 39 GPIO_ACTIVE_HIGH>;
 		};
 	};
 
 	/*
-	 * Quectel EC200A-EL (ASR platform) control lines, taken from the stock
-	 * kernel's /proc/tplink GPIO handlers. Default output states power the
-	 * modem on and hold it out of reset so it enumerates over USB (ECM).
-	 * Polarity and the exact power-up sequence are NOT yet validated on
-	 * hardware; adjust once first boot confirms modem enumeration.
+	 * Quectel EC200A-EL (ASR platform) control lines from the stock kernel's
+	 * /proc/tplink handlers (usb_power, usb_dc, usb_boot, usb_reset,
+	 * usb_antenna). These lines are not inverted, and the output levels
+	 * below are the stock steady-state levels: power, dc and antenna high,
+	 * boot and reset low. Stock only drives reset/boot high to put the
+	 * modem into its firmware-download mode.
 	 */
 	gpio_export {
 		compatible = "gpio-export";
@@ -116,7 +123,7 @@
 
 		modem_antenna {
 			gpio-export,name = "modem_antenna";
-			gpio-export,output = <0>;
+			gpio-export,output = <1>;
 			gpios = <&gpio 5 GPIO_ACTIVE_HIGH>;
 		};
 	};
@@ -132,15 +139,14 @@
 		m25p,fast-read;
 
 		/*
-		 * 8 MiB layout, derived from the stock kernel's static MTD
-		 * table. kernel + rootfs are merged into a single "firmware"
-		 * partition. The trailing vendor partitions (ispconfig, config,
-		 * configbak, romfile, radio, userdata) are read-only so OpenWrt
-		 * itself cannot write per-unit MAC/calibration data; this does
-		 * not constrain what the stock bootloader's recovery writes.
-		 * The romfile MAC offset (0xf100) and radio EEPROM offset (0x0)
-		 * are carried over from the 16 MiB MB130-4G and still need
-		 * confirmation against a real MB118 flash dump.
+		 * 8 MiB layout, matching a full MB118 flash dump. kernel + rootfs
+		 * are merged into a single "firmware" partition. The trailing
+		 * vendor partitions (ispconfig, config, configbak, romfile, radio,
+		 * userdata) are read-only so OpenWrt itself cannot write per-unit
+		 * MAC/calibration data; this does not constrain what the stock
+		 * bootloader's recovery writes. romfile holds the base MAC at
+		 * 0xf100; radio holds the MT7628 EEPROM at 0x0 (its own MAC field
+		 * is the 00:0c:43 default, so it is not used).
 		 */
 		partitions {
 			compatible = "fixed-partitions";
@@ -222,7 +228,7 @@
 
 &state_default {
 	gpio {
-		groups = "i2c", "i2s", "p0led_an", "p1led_an", "p2led_an", "p3led_an", "p4led_an", "perst", "refclk", "uart1", "wdt";
+		groups = "i2c", "i2s", "p0led_an", "p1led_an", "p2led_an", "p3led_an", "p4led_an", "perst", "refclk", "uart1", "wdt", "wled_an";
 		function = "gpio";
 	};
 };
@@ -234,11 +240,11 @@
 };
 
 /*
- * The MB118-4G exposes a single Ethernet connector. The physical switch
- * port it maps to is not yet confirmed, so the esw portmap/portdisable
- * default from mt7628an.dtsi is left in place (all PHYs active) to keep the
- * port reachable on first boot regardless of wiring. Narrow this once the
- * live port number is known.
+ * The MB118-4G exposes a single Ethernet connector. The stock driver's
+ * generic link checks (ports 1-4) do not identify which switch port it is
+ * wired to, so the esw default from mt7628an.dtsi is left in place (all
+ * PHYs active) to keep the port reachable on first boot regardless of
+ * wiring. Narrow this once the live port number is known.
  */
 &ethernet {
 	nvmem-cells = <&macaddr_romfile_f100 0>;

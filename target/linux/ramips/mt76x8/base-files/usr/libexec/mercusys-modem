@@ -1,0 +1,121 @@
+#!/bin/sh
+# Modem helper for the MERCUSYS MB118-4G v1 (Quectel EC200A in RNDIS mode).
+#
+# The stock firmware leaves the modem in RNDIS mode with its data profile
+# already stored, and starts the data call itself with AT+QNETDEVCTL. OpenWrt
+# runs plain DHCP on wwan0, so this helper:
+#   - starts the data call on the modem's stored internet context when it is
+#     down, only while "wan" is the default DHCP-on-wwan0 setup (switching wan
+#     to another protocol, e.g. ncm, or disabling it hands control back), and
+#   - drives the three signal-strength LEDs from AT+CESQ/AT+CSQ.
+# It never changes the modem's APN or other stored settings.
+
+INTERVAL=15
+LOCK=/var/lock/mercusys-modem.lock
+LEDS=/sys/class/leds
+
+# AT port: USB interface 3 of the modem (the stock firmware's AT port).
+find_at_port() {
+	local t
+
+	for t in /sys/class/tty/ttyUSB*; do
+		[ -e "$t" ] || continue
+		case "$(readlink -f "$t/device")" in
+		*:1.3/ttyUSB*)
+			echo "/dev/${t##*/}"
+			return 0
+			;;
+		esac
+	done
+	return 1
+}
+
+at() {
+	COMMAND="$1" flock "$LOCK" gcom -d "$port" -s /etc/gcom/runcommand.gcom 2>/dev/null | tr -d '\r'
+}
+
+# First defined context whose APN is neither empty nor IMS (stock: 2).
+parse_data_cid() {
+	awk -F'[:,]' '/^\+CGDCONT:/ {
+		apn = $4; gsub(/"/, "", apn)
+		cid = $2; gsub(/ /, "", cid)
+		if (apn != "" && tolower(apn) != "ims") { print cid; exit }
+	}'
+}
+
+# Last field of "+QNETDEVCTL: <op>,<cid>,<urc>,<state>"; 1 = connected.
+parse_link_state() {
+	sed -n 's/^+QNETDEVCTL: *[0-9]*,[0-9]*,[0-9]*,\([0-9]*\).*/\1/p'
+}
+
+# Signal bars 0-3 from "+CESQ: ...,<rsrq>,<rsrp>" (RSRP index n ~ n-141 dBm,
+# 255 = unknown), falling back to "+CSQ: <rssi>,<ber>" (99 = unknown).
+# Thresholds are conventional; the stock table has not been extracted.
+parse_signal_level() {
+	awk -F'[:,]' '
+	/^\+CESQ:/ { rsrp = $NF + 0; have_cesq = ($NF + 0 != 255) }
+	/^\+CSQ:/ { csq = $2 + 0; have_csq = (csq != 99) }
+	END {
+		if (have_cesq) {
+			dbm = rsrp - 141
+			print (dbm >= -95) ? 3 : (dbm >= -105) ? 2 : (dbm >= -115) ? 1 : 0
+		} else if (have_csq) {
+			print (csq >= 20) ? 3 : (csq >= 12) ? 2 : (csq >= 5) ? 1 : 0
+		} else {
+			print 0
+		}
+	}'
+}
+
+set_signal_leds() {
+	local i
+
+	for i in 1 2 3; do
+		if [ "$1" -ge "$i" ]; then
+			echo 1 > "$LEDS/green:signal$i/brightness"
+		else
+			echo 0 > "$LEDS/green:signal$i/brightness"
+		fi
+	done 2>/dev/null
+}
+
+dial_managed() {
+	[ "$(uci -q get network.wan.proto)" = "dhcp" ] &&
+	[ "$(uci -q get network.wan.device)" = "wwan0" ] &&
+	[ "$(uci -q get network.wan.disabled)" != "1" ]
+}
+
+main() {
+	local cid level prev_level= state prev_state=
+
+	while :; do
+		port=$(find_at_port) || {
+			[ "$prev_level" = 0 ] || set_signal_leds 0
+			prev_level=0
+			sleep 5
+			continue
+		}
+
+		if dial_managed; then
+			state=$(at 'AT+QNETDEVCTL?' | parse_link_state)
+			if [ "$state" != "1" ]; then
+				cid=$(at 'AT+CGDCONT?' | parse_data_cid)
+				[ -n "$cid" ] || cid=1
+				[ "$state" = "$prev_state" ] ||
+					logger -t mercusys-modem "data link down (state ${state:-unknown}), connecting context $cid"
+				at "AT+QNETDEVCTL=1,$cid,1" >/dev/null
+			elif [ "$prev_state" != "1" ]; then
+				logger -t mercusys-modem "data link up"
+			fi
+			prev_state=$state
+		fi
+
+		level=$({ at 'AT+CESQ'; at 'AT+CSQ'; } | parse_signal_level)
+		[ "$level" = "$prev_level" ] || set_signal_leds "$level"
+		prev_level=$level
+
+		sleep "$INTERVAL"
+	done
+}
+
+[ -n "$INCLUDE_ONLY" ] || main

@@ -635,7 +635,7 @@ $(Device/tplink-v2)
   DEVICE_MODEL := MB118-4G
   DEVICE_VARIANT := v1
   DEVICE_PACKAGES := kmod-usb2 kmod-usb-serial-option kmod-usb-net-cdc-ether \
-	kmod-usb-net-rndis
+	kmod-usb-net-rndis comgt
   TPLINK_FLASHLAYOUT := 8Mmtk
   # No tftp-recovery image: the stock bootloader recovery writes a fixed
   # 0x7a0000 bytes at 0x20000, which would overwrite romfile/radio (MAC and

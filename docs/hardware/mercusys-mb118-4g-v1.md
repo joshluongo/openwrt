@@ -531,10 +531,19 @@ What stock does (from strings in `/usr/bin/cos` and `/usr/bin/mobile`):
   this across reboots, which is why it appears as `2c7c:6005` with
   `rndis_host`.
 - Enables the modem's NAT/router mode with `AT+QCFG="nat",1`.
-- Starts and stops the data call with `AT+QNETDEVCTL=1,1,1` and
-  `AT+QNETDEVCTL=1,2,1`, sent over an AT `ttyUSB` port by the `mobile`
-  daemon. That is: operation 1 = connect, 2 = disconnect; context ID 1; with
-  URC reports enabled.
+- Starts the data call with `AT+QNETDEVCTL=<op>,<cid>,<urc>`; the strings
+  `=1,1,1` and `=1,2,1` are both connect (op 1) requests, for context 1 and
+  context 2 respectively. The `mobile` daemon sends them over `ttyUSB1`.
+- A live read-only query on the second AT port (`ttyUSB2`) on 2026-11-05
+  returned:
+  - `+QNETDEVCTL: 1,2,1,1` — connected (last field 1) on **context 2**,
+    with URCs enabled.
+  - `+CGDCONT`: context 2 holds the carrier's internet APN (`IPV4V6`) and
+    context 8 is IMS. **No context 1 is defined**, so OpenWrt must dial
+    context 2 (or whichever context holds the APN on another SIM).
+  - `+CPIN: READY` (no SIM PIN), `+QCFG: "usbnet",3` and `+QCFG: "nat",1`.
+  - `+CSQ: 27,99`. `AT+QENG="servingcell"` is not implemented on this ASR
+    firmware; it answered `+EEMGINFO : 3, 2`.
 - Then runs DHCP on the network interface (`lte0` on stock). The live stock
   system had a carrier-grade NAT IPv4 address (`100.64.0.0/10` range, /24
   mask) and a global IPv6 address on that interface. The modem therefore
@@ -550,14 +559,18 @@ If a dial step is needed, the minimal design is:
 
 1. A procd init script, or a hotplug script on the `wwan0` add event. It
    waits for the AT port, then sends
-   `AT+CGDCONT=1,"IPV4V6","<apn>"` (only if an APN is configured), then
-   `AT+CPIN="<pin>"` (only if the SIM requests one), then
-   `AT+QNETDEVCTL=1,1,1`. Finally it brings `wan`/`wan6` up, or lets netifd
-   retry.
-2. A UCI section (for example `network.wan.apn`, `pin`, `device`), so these
-   settings survive sysupgrade and could later be exposed in LuCI.
-3. A watchdog: if DHCP fails or traffic stops, re-send `AT+QNETDEVCTL=1,2,1`
-   then `=1,1,1`. As a last resort, pulse modem reset through the exported
+   `AT+CGDCONT=<cid>,"IPV4V6","<apn>"` (only if an APN is configured;
+   the stock profile already uses cid 2), then `AT+CPIN="<pin>"` (only if
+   `AT+CPIN?` does not report `READY`), then `AT+QNETDEVCTL=1,<cid>,1`.
+   Finally it brings `wan`/`wan6` up, or lets netifd retry.
+2. A UCI section (for example `network.wan.apn`, `pin`, `cid`, `device`), so
+   these settings survive sysupgrade and could later be exposed in LuCI.
+   Default `cid` to 2, matching the stock profile.
+3. A watchdog: if DHCP fails or traffic stops, query `AT+QNETDEVCTL?`; if
+   the last field is not 1, re-send the connect. The disconnect operation
+   value has not been confirmed for this firmware (Quectel documents
+   `<op>` 0 = disconnect for this command family), so do not rely on it
+   untested. As a last resort, pulse modem reset through the exported
    `modem_reset` GPIO (high asserts reset, as on stock).
 4. For the AT transport, use `sms-tool` (`feeds/packages/utils/sms-tool`, a
    small C binary that has an `at` command) or `comgt`'s `gcom`
@@ -570,12 +583,20 @@ in `proto_setup` and then hand `wwan0` to DHCP. That is more code, but it is
 how upstream would expect it to be integrated.
 
 Open questions:
-- Which `ttyUSB` is the AT port for this composition. Interfaces 2, 3 and 4
-  are all vendor-class `option` ports. Quectel usually puts DM on the first,
-  then AT and modem/PPP, but this must be checked live.
+- AT ports: on the running stock firmware the `mobile` daemon holds
+  `/dev/ttyUSB1` (USB interface 3), and `/dev/ttyUSB2` (interface 4) also
+  answers AT commands. Use `ttyUSB2` for scripts, so they do not contend
+  with anything else that opens `ttyUSB1`. Under OpenWrt, interfaces 2–4
+  should likewise become `ttyUSB0`–`ttyUSB2`; confirm on first boot. The role
+  of `ttyUSB0` is unconfirmed.
+- Whether the modem reconnects by itself after a power cycle without the
+  stock daemon. Check with `AT+QNETDEVCTL?` on the first OpenWrt boot; until
+  then, assume a dial step is required.
 - Whether the modem's NAT mode (`"nat",1`) interferes with IPv6 or with
-  bridging. The stock behaviour (public IPv6 on the host side) suggests it
-  is fine.
+  bridging. The evidence suggests it does not: `mobile_cli get_rt_param`
+  showed the router receiving the carrier's own addressing (CGNAT IPv4
+  address and gateway, carrier DNS, IPv6 DNS), and the interface had a
+  global IPv6 address.
 
 ### Signal-strength LEDs (blocking for "all LEDs work")
 
@@ -585,11 +606,17 @@ level 1 lights GPIO 41, level 2 lights 41+40, level 3 lights 41+40+39. In
 OpenWrt these are `green:signal1`–`green:signal3`, which no trigger drives.
 
 Needed: a small procd service that polls every 10–30 s over the AT port and
-writes `/sys/class/leds/green:signal{1,2,3}/brightness`. It can poll either
-`AT+CSQ`, returning RSSI 0–31 or 99 for unknown, or
-`AT+QENG="servingcell"`, which on LTE returns RSRP/RSRQ/SINR. It can share the
+writes `/sys/class/leds/green:signal{1,2,3}/brightness`. It can poll
+`AT+CSQ`, which returns RSSI 0–31 or 99 for unknown, or `AT+CESQ` for
+RSRQ/RSRP. `AT+QENG="servingcell"` is not available on this ASR firmware
+(see above). It can share the
 AT helper with the dial script, but must serialize access to the port. The
-stock thresholds have not been extracted from `mobile`. A conventional
+stock thresholds have not been extracted from `mobile`. Stock uses two
+scales: `mobile_cli get_sig_lvl` reports 0–4, while the LED level written to
+`/proc/tplink/led_signal_strength` is 0–3. One live sample (2026-11-05)
+had `+CESQ: 51,99,255,255,20,50`, i.e. RSRQ about −10 dB (field 5 = 20)
+and RSRP about −90 dBm (field 6 = 50, decoded as −140 + n dBm). At those
+values the signal level was 4 and the LED level 3. A conventional
 mapping is RSRP ≥ −95 dBm → 3, ≥ −105 → 2, ≥ −115 → 1, else 0, or by CSQ
 ≥ 20 / ≥ 12 / ≥ 5. Extracting the stock table from `mobile` would match the
 vendor behaviour exactly.
@@ -628,13 +655,13 @@ the board. Its meaning (which level selects which antenna) is unverified.
 
 ### Data still to collect from the running stock firmware
 
-All read-only:
-- Which `ttyUSB` the `mobile` daemon uses: `ls -l /proc/<pid of mobile>/fd`.
-- The modem's stored settings, queried without disturbing the daemon if
-  possible: `AT+QCFG="usbnet"`, `AT+QCFG="nat"`, `AT+QNETDEVCTL?`,
-  `AT+CGDCONT?`, `AT+CPIN?`, `AT+CSQ`, `AT+QENG="servingcell"`.
-- Whether the modem reconnects by itself: compare `AT+QNETDEVCTL?` after a
-  modem reset. This is the deciding input for the LTE dial work.
+The AT port and the modem's stored settings were collected on 2026-11-05
+(see above). The stock shell has no `printf`; `echo -ne "AT…\r" >
+/dev/ttyUSB2` with a background `cat /dev/ttyUSB2` works. Still useful, all
+read-only:
+- The stock signal level alongside raw values, to recover the stock bar
+  thresholds: `cat /proc/tplink/led_signal_strength` together with `AT+CSQ`
+  and `AT+CESQ`, ideally at a few different signal strengths.
 
 ## Feature acceptance criteria
 

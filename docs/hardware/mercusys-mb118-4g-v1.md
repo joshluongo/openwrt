@@ -339,6 +339,11 @@ A first-draft `ramips/mt76x8` target was added:
   as the standard `wan`/`wan6` on `wwan0` (DHCP over RNDIS).
 - `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `wwan0`; LAN
   LED as a switch-link trigger on port 4 (mask `0x10`).
+- `mt76x8/base-files/etc/init.d/mercusys-modem` and
+  `mt76x8/base-files/usr/libexec/mercusys-modem` — a procd service, active
+  only on this board, that starts the LTE data call and drives the signal
+  LEDs (see "Modem helper service"). `comgt` is added to `DEVICE_PACKAGES`
+  for its `gcom` AT-command tool.
 
 Design choices and their basis:
 
@@ -508,14 +513,43 @@ in case stock firmware has changed `config` since.
 
 The hardware port gives OpenWrt the modem's network interface (`wwan0`), its
 AT ports (`option`, interfaces 2–4, which become `ttyUSB0`–`ttyUSB2`), and the
-LEDs. The stock firmware does more in userspace, and none of that exists in
-this port yet. This section records what stock does and what OpenWrt would
-need, so the work can be scoped. None of it has been implemented or tested.
+LEDs. The stock firmware does more in userspace. This section records what
+stock does and what OpenWrt needs. The LTE data call and the signal LEDs are
+now implemented by the modem helper service below, untested on hardware.
+SMS, USSD and network selection are not implemented.
+
+### Modem helper service
+
+`/usr/libexec/mercusys-modem`, started by `/etc/init.d/mercusys-modem` with
+procd respawn, only on `mercusys,mb118-4g-v1`. Every 15 s it:
+
+1. Finds the AT port by USB interface number (interface 3, the stock
+   firmware's AT port), not by `ttyUSB` index. If no port is present, it
+   turns the signal LEDs off and retries.
+2. If `wan` is the default setup (`proto dhcp`, `device wwan0`, not
+   disabled), it queries `AT+QNETDEVCTL?`. When the last field is not 1, it
+   reads `AT+CGDCONT?`, picks the first context with a non-empty, non-IMS APN
+   (2 with the stock profile, falling back to 1) and sends
+   `AT+QNETDEVCTL=1,<cid>,1`. State changes are logged with tag
+   `mercusys-modem`. If `wan` is switched to another protocol (for example
+   `ncm`, to set a custom APN) or disabled, it stops dialling and leaves the
+   modem alone.
+3. Sets `green:signal1`–`green:signal3` from `AT+CESQ` RSRP (≥ −95 dBm → 3,
+   ≥ −105 → 2, ≥ −115 → 1), or from `AT+CSQ` (≥ 20 / ≥ 12 / ≥ 5) when RSRP is
+   unknown.
+
+It never writes the APN or any other stored modem setting. AT commands go
+through `gcom` with `/etc/gcom/runcommand.gcom`, serialized with `flock`.
+`ttyUSB2` stays free for users and tools such as `sms-tool`. The parsers are
+tested against the replies captured from this modem (context selection,
+link state, signal levels, CRLF), under both macOS `sh` and BusyBox `ash`.
+None of it has run on the device.
 
 ### Space budget
 
-The current sysupgrade payload is `0x550004` bytes (about 5.3 MiB) of the
-`0x690000`-byte firmware partition. That leaves about 1.25 MiB for the JFFS2
+The current sysupgrade payload, including `comgt` and the helper service, is
+`0x560004` bytes (about 5.4 MiB) of the `0x690000`-byte firmware partition.
+That leaves about 1.19 MiB for the JFFS2
 overlay, which holds both configuration and any installed packages. Anything
 substantial should be built into the image rather than installed with `opkg`,
 and the image must still pass `check-size`. ModemManager
@@ -523,7 +557,7 @@ and the image must still pass `check-size`. ModemManager
 does not fit. A small shell script using AT commands is the realistic
 approach.
 
-### LTE data connection (blocking for LTE)
+### LTE data connection (background for the helper service)
 
 What stock does (from strings in `/usr/bin/cos` and `/usr/bin/mobile`):
 
@@ -555,7 +589,19 @@ on `wwan0`. If the modem does not start a data call by itself after power-up,
 `cos` is **unknown**; check it before writing code (see "Data still to
 collect").
 
-If a dial step is needed, the minimal design is:
+The helper service above implements the dial step. The in-tree `ncm`
+protocol (`comgt-ncm`) has a generic `quectel` entry, which connects with
+`AT+qnetdevctl=1,${profile},1` and disconnects with `=0,${profile},0`. It is
+not the default because:
+- it always rewrites the context's APN with `AT+QICSGP` (blanking it when
+  no APN is configured);
+- `config_generate` gives `ncm` interfaces profile 1 and `pdptype ipv4`,
+  while this modem's data context is 2.
+It remains the way to set a custom APN: set `wan` to `proto ncm`,
+`device /dev/ttyUSB2`, `profile 2`, `pdptype ipv4v6` and `apn`, and install
+`comgt-ncm`.
+
+The original design notes for a dial step follow:
 
 1. A procd init script, or a hotplug script on the `wwan0` add event. It
    waits for the AT port, then sends
@@ -598,7 +644,7 @@ Open questions:
   address and gateway, carrier DNS, IPv6 DNS), and the interface had a
   global IPv6 address.
 
-### Signal-strength LEDs (blocking for "all LEDs work")
+### Signal-strength LEDs (implemented by the helper service)
 
 On stock, `/usr/bin/mobile` reads the signal and writes a level of 0–3 to
 `/proc/tplink/led_signal_strength`. The kernel maps that level to GPIOs:

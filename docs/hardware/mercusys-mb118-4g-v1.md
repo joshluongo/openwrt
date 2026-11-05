@@ -504,6 +504,138 @@ the per-unit region is additionally confirmed by matching per-partition MD5
 sums from the live system. Re-check those sums immediately before flashing,
 in case stock firmware has changed `config` since.
 
+## Remaining software work
+
+The hardware port gives OpenWrt the modem's network interface (`wwan0`), its
+AT ports (`option`, interfaces 2–4, which become `ttyUSB0`–`ttyUSB2`), and the
+LEDs. The stock firmware does more in userspace, and none of that exists in
+this port yet. This section records what stock does and what OpenWrt would
+need, so the work can be scoped. None of it has been implemented or tested.
+
+### Space budget
+
+The current sysupgrade payload is `0x550004` bytes (about 5.3 MiB) of the
+`0x690000`-byte firmware partition. That leaves about 1.25 MiB for the JFFS2
+overlay, which holds both configuration and any installed packages. Anything
+substantial should be built into the image rather than installed with `opkg`,
+and the image must still pass `check-size`. ModemManager
+(`feeds/packages/net/modemmanager`, plus GLib, D-Bus, libqmi and libmbim)
+does not fit. A small shell script using AT commands is the realistic
+approach.
+
+### LTE data connection (blocking for LTE)
+
+What stock does (from strings in `/usr/bin/cos` and `/usr/bin/mobile`):
+
+- Puts the modem in RNDIS mode with `AT+QCFG="usbnet",3`. The modem keeps
+  this across reboots, which is why it appears as `2c7c:6005` with
+  `rndis_host`.
+- Enables the modem's NAT/router mode with `AT+QCFG="nat",1`.
+- Starts and stops the data call with `AT+QNETDEVCTL=1,1,1` and
+  `AT+QNETDEVCTL=1,2,1`, sent over an AT `ttyUSB` port by the `mobile`
+  daemon. That is: operation 1 = connect, 2 = disconnect; context ID 1; with
+  URC reports enabled.
+- Then runs DHCP on the network interface (`lte0` on stock). The live stock
+  system had a carrier-grade NAT IPv4 address (`100.64.0.0/10` range, /24
+  mask) and a global IPv6 address on that interface. The modem therefore
+  passes the carrier addressing through, with IPv6 by SLAAC.
+
+What OpenWrt does with the current port: `wan` (DHCP) and `wan6` (DHCPv6/RA)
+on `wwan0`. If the modem does not start a data call by itself after power-up,
+`wwan0` links up but DHCP gets no reply. Whether it auto-connects without
+`cos` is **unknown**; check it before writing code (see "Data still to
+collect").
+
+If a dial step is needed, the minimal design is:
+
+1. A procd init script, or a hotplug script on the `wwan0` add event. It
+   waits for the AT port, then sends
+   `AT+CGDCONT=1,"IPV4V6","<apn>"` (only if an APN is configured), then
+   `AT+CPIN="<pin>"` (only if the SIM requests one), then
+   `AT+QNETDEVCTL=1,1,1`. Finally it brings `wan`/`wan6` up, or lets netifd
+   retry.
+2. A UCI section (for example `network.wan.apn`, `pin`, `device`), so these
+   settings survive sysupgrade and could later be exposed in LuCI.
+3. A watchdog: if DHCP fails or traffic stops, re-send `AT+QNETDEVCTL=1,2,1`
+   then `=1,1,1`. As a last resort, pulse modem reset through the exported
+   `modem_reset` GPIO (high asserts reset, as on stock).
+4. For the AT transport, use `sms-tool` (`feeds/packages/utils/sms-tool`, a
+   small C binary that has an `at` command) or `comgt`'s `gcom`
+   (`package/network/utils/comgt`). Plain `echo`/`cat` on the tty is fragile
+   because unsolicited result codes interleave with replies.
+
+A cleaner long-term option is a netifd protocol handler, for example
+`proto quectel-rndis`, modelled on `uqmi`'s `qmi.sh`. It would run the dial
+in `proto_setup` and then hand `wwan0` to DHCP. That is more code, but it is
+how upstream would expect it to be integrated.
+
+Open questions:
+- Which `ttyUSB` is the AT port for this composition. Interfaces 2, 3 and 4
+  are all vendor-class `option` ports. Quectel usually puts DM on the first,
+  then AT and modem/PPP, but this must be checked live.
+- Whether the modem's NAT mode (`"nat",1`) interferes with IPv6 or with
+  bridging. The stock behaviour (public IPv6 on the host side) suggests it
+  is fine.
+
+### Signal-strength LEDs (blocking for "all LEDs work")
+
+On stock, `/usr/bin/mobile` reads the signal and writes a level of 0–3 to
+`/proc/tplink/led_signal_strength`. The kernel maps that level to GPIOs:
+level 1 lights GPIO 41, level 2 lights 41+40, level 3 lights 41+40+39. In
+OpenWrt these are `green:signal1`–`green:signal3`, which no trigger drives.
+
+Needed: a small procd service that polls every 10–30 s over the AT port and
+writes `/sys/class/leds/green:signal{1,2,3}/brightness`. It can poll either
+`AT+CSQ`, returning RSSI 0–31 or 99 for unknown, or
+`AT+QENG="servingcell"`, which on LTE returns RSRP/RSRQ/SINR. It can share the
+AT helper with the dial script, but must serialize access to the port. The
+stock thresholds have not been extracted from `mobile`. A conventional
+mapping is RSRP ≥ −95 dBm → 3, ≥ −105 → 2, ≥ −115 → 1, else 0, or by CSQ
+≥ 20 / ≥ 12 / ≥ 5. Extracting the stock table from `mobile` would match the
+vendor behaviour exactly.
+
+The stock kernel also has an `led_lte` control, but its write handler only
+records a mode. No separate LTE LED GPIO was found in the GPIO table, so the
+internet LED (GPIO 44, `netdev` on `wwan0`) covers that role.
+
+### SMS, USSD and network selection (stock web UI features)
+
+On stock, `mobile` and `cos` implement SMS inbox/send, USSD, PIN management,
+manual or automatic network selection (`AT+COPS`), band locking
+(`AT+QCFG="band",…`, `"nwscanmode"`) and data-usage statistics.
+
+OpenWrt options:
+- `sms-tool` covers SMS read/send/delete, USSD and raw AT commands from the
+  shell. Its packages-feed LuCI front-end, `luci-app-sms-tool`, was not found
+  in this tree's feeds. Any LuCI page would have to be written or taken from
+  a third-party feed, and space-checked.
+- Network selection, band locking and scan modes need only raw AT commands.
+  They can be scripted, but have no UI.
+- Data-usage statistics: `vnstat`/`nlbwmon` can count `wwan0`, at an
+  additional space cost.
+
+None of this is required to boot or route. All of it is required for parity
+with the stock web UI, and the acceptance criteria below list it separately.
+
+### Modem antenna and DC lines
+
+`modem_antenna` (GPIO 5) and `modem_dc` (GPIO 37) are exported at the stock
+steady-state levels (high). Stock never changes `usb_antenna` from
+userspace, so the internal/external antenna choice is presumably fixed by
+the board. Its meaning (which level selects which antenna) is unverified.
+`usb_dc` is written from a configuration value (`echo %d >
+/proc/tplink/usb_dc`) whose UI meaning has not been traced.
+
+### Data still to collect from the running stock firmware
+
+All read-only:
+- Which `ttyUSB` the `mobile` daemon uses: `ls -l /proc/<pid of mobile>/fd`.
+- The modem's stored settings, queried without disturbing the daemon if
+  possible: `AT+QCFG="usbnet"`, `AT+QCFG="nat"`, `AT+QNETDEVCTL?`,
+  `AT+CGDCONT?`, `AT+CPIN?`, `AT+CSQ`, `AT+QENG="servingcell"`.
+- Whether the modem reconnects by itself: compare `AT+QNETDEVCTL?` after a
+  modem reset. This is the deciding input for the LTE dial work.
+
 ## Feature acceptance criteria
 
 "All features work" requires on-device validation, not just a successful build:

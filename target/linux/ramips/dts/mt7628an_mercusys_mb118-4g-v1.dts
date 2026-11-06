@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+#include "mt7628an.dtsi"
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	compatible = "mercusys,mb118-4g-v1", "mediatek,mt7628an-soc";
+	model = "MERCUSYS MB118-4G v1";
+
+	aliases {
+		led-boot = &led_power;
+		led-failsafe = &led_power;
+		led-running = &led_power;
+		led-upgrade = &led_power;
+		label-mac-device = &ethernet;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200";
+	};
+
+	/*
+	 * GPIO and polarity data below are taken from the stock kernel's
+	 * tplink LED/GPIO driver: it polls GPIO 38 for the reset button
+	 * (pressed reads low), and inverts only the LED GPIOs (46, 44, 43, 42,
+	 * 41, 40, 39) so that "on" drives the pin high.
+	 */
+	keys {
+		compatible = "gpio-keys";
+
+		reset {
+			label = "reset";
+			gpios = <&gpio 38 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_power: power {
+			function = LED_FUNCTION_POWER;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 46 GPIO_ACTIVE_HIGH>;
+		};
+
+		wlan2g {
+			function = LED_FUNCTION_WLAN_2GHZ;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 43 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "phy0tpt";
+		};
+
+		lan {
+			function = LED_FUNCTION_LAN;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 42 GPIO_ACTIVE_HIGH>;
+		};
+
+		internet {
+			function = LED_FUNCTION_WAN_ONLINE;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio 44 GPIO_ACTIVE_HIGH>;
+		};
+
+		/*
+		 * Cellular signal-strength indicators, weakest (signal1) to
+		 * strongest (signal3). Driven from userspace; no kernel trigger.
+		 */
+		signal1 {
+			label = "green:signal1";
+			gpios = <&gpio 41 GPIO_ACTIVE_HIGH>;
+		};
+
+		signal2 {
+			label = "green:signal2";
+			gpios = <&gpio 40 GPIO_ACTIVE_HIGH>;
+		};
+
+		signal3 {
+			label = "green:signal3";
+			gpios = <&gpio 39 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	/*
+	 * Quectel EC200A-EL (ASR platform) control lines from the stock kernel's
+	 * /proc/tplink handlers (usb_power, usb_dc, usb_boot, usb_reset,
+	 * usb_antenna). These lines are not inverted, and the output levels
+	 * below are the stock steady-state levels: power, dc and antenna high,
+	 * boot and reset low. Stock only drives reset/boot high to put the
+	 * modem into its firmware-download mode.
+	 */
+	gpio_export {
+		compatible = "gpio-export";
+
+		modem_power {
+			gpio-export,name = "modem_power";
+			gpio-export,output = <1>;
+			gpios = <&gpio 36 GPIO_ACTIVE_HIGH>;
+		};
+
+		modem_dc {
+			gpio-export,name = "modem_dc";
+			gpio-export,output = <1>;
+			gpios = <&gpio 37 GPIO_ACTIVE_HIGH>;
+		};
+
+		modem_boot {
+			gpio-export,name = "modem_boot";
+			gpio-export,output = <0>;
+			gpios = <&gpio 3 GPIO_ACTIVE_HIGH>;
+		};
+
+		modem_reset {
+			gpio-export,name = "modem_reset";
+			gpio-export,output = <0>;
+			gpios = <&gpio 4 GPIO_ACTIVE_HIGH>;
+		};
+
+		modem_antenna {
+			gpio-export,name = "modem_antenna";
+			gpio-export,output = <1>;
+			gpios = <&gpio 5 GPIO_ACTIVE_HIGH>;
+		};
+	};
+};
+
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		m25p,fast-read;
+
+		/*
+		 * 8 MiB layout, matching a full MB118 flash dump. kernel + rootfs
+		 * are merged into a single "firmware" partition. The trailing
+		 * vendor partitions (ispconfig, config, configbak, romfile, radio,
+		 * userdata) are read-only so OpenWrt itself cannot write per-unit
+		 * MAC/calibration data; this does not constrain what the stock
+		 * bootloader's recovery writes. romfile holds the base MAC at
+		 * 0xf100; radio holds the MT7628 EEPROM at 0x0 (its own MAC field
+		 * is the 00:0c:43 default, so it is not used).
+		 */
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "u-boot";
+				reg = <0x0 0x20000>;
+				read-only;
+			};
+
+			partition@20000 {
+				compatible = "tplink,firmware";
+				label = "firmware";
+				reg = <0x20000 0x690000>;
+			};
+
+			partition@6b0000 {
+				label = "ispconfig";
+				reg = <0x6b0000 0x10000>;
+				read-only;
+			};
+
+			partition@6c0000 {
+				label = "config";
+				reg = <0x6c0000 0x10000>;
+				read-only;
+			};
+
+			partition@6d0000 {
+				label = "configbak";
+				reg = <0x6d0000 0x10000>;
+				read-only;
+			};
+
+			partition@6e0000 {
+				label = "romfile";
+				reg = <0x6e0000 0x10000>;
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					macaddr_romfile_f100: macaddr@f100 {
+						compatible = "mac-base";
+						reg = <0xf100 0x6>;
+						#nvmem-cell-cells = <1>;
+					};
+				};
+			};
+
+			partition@6f0000 {
+				label = "radio";
+				reg = <0x6f0000 0x10000>;
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					eeprom_radio_0: eeprom@0 {
+						reg = <0x0 0x400>;
+					};
+				};
+			};
+
+			partition@700000 {
+				label = "userdata";
+				reg = <0x700000 0x100000>;
+				read-only;
+			};
+		};
+	};
+};
+
+&state_default {
+	gpio {
+		groups = "i2c", "i2s", "p0led_an", "p1led_an", "p2led_an",
+			 "p3led_an", "p4led_an", "perst", "refclk", "uart1", "wdt",
+			 "wled_an";
+		function = "gpio";
+	};
+};
+
+&wmac {
+	nvmem-cells = <&eeprom_radio_0>, <&macaddr_romfile_f100 0>;
+	nvmem-cell-names = "eeprom", "mac-address";
+	status = "okay";
+};
+
+/*
+ * The MB118-4G exposes a single Ethernet connector, wired to switch port 4
+ * (the only port with traffic and link on the running stock firmware).
+ */
+&esw {
+	mediatek,portdisable = <0x2f>;
+};
+
+&ethernet {
+	nvmem-cells = <&macaddr_romfile_f100 0>;
+	nvmem-cell-names = "mac-address";
+};

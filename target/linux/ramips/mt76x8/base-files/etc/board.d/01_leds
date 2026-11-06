@@ -88,6 +88,10 @@ keenetic,kn-1713)
 mediatek,linkit-smart-7688)
 	ucidef_set_led_wlan "wifi" "wifi" "orange:wifi" "phy0tpt"
 	;;
+mercusys,mb118-4g-v1)
+	ucidef_set_led_switch "lan" "lan" "green:lan" "switch0" "0x10"
+	ucidef_set_led_netdev "internet" "internet" "green:wan-online" "usb0"
+	;;
 movingcomm,c120ev)
 	ucidef_set_led_netdev "lan" "lan" "green:lan" "eth0" "link"
 	;;

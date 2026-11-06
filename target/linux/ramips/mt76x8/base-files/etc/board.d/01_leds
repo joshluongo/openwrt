@@ -122,7 +122,7 @@ cudy,lt500-outdoor-v1)
 	ucidef_set_led_netdev "internet" "internet" "green:wan-online" "usb0"
 	;;
 mercusys,mb118-4g-v1)
-	ucidef_set_led_netdev "internet" "internet" "green:wan-online" "wwan0"
+	ucidef_set_led_netdev "internet" "internet" "green:wan-online" "usb0"
 	ucidef_set_led_switch "lan" "lan" "green:lan" "switch0" "0x10"
 	;;
 cudy,re1200-outdoor-v1|\

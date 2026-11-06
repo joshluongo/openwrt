@@ -1,0 +1,12 @@
+# Send $COMMAND and print everything the modem replies within 2 seconds.
+# (comgt's runcommand.gcom only reports success, never the reply text.)
+opengt
+ set com 115200n81
+ set comecho off
+ set senddelay 0.02
+ waitquiet 0.2 0.2
+ send $env("COMMAND")
+ send "^m"
+ get 2 "" $s
+ print $s
+ exit 0

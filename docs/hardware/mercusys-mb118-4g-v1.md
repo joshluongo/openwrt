@@ -2,13 +2,14 @@
 
 Recorded: 2026-11-03
 
-Status: a first-draft target was added to this tree and **now builds cleanly**
-(see "Implemented port" below). It has **not** been booted or flashed on
-hardware. No flash or configuration writes were performed on the device during
-this investigation. On 2026-11-05 the owner supplied a full 8 MiB flash dump;
-its findings are under "Full flash dump" and they resolve the per-unit data
-blocker for a TFTP-recovery install (see "Installation method"). That install
-is still untested and remains the single irreversible step.
+Status: the port builds on OpenWrt v25.12.6 (see "Implemented port" below)
+and **runs on the owner's unit** since 2026-11-06. On 2026-11-05 the owner
+supplied a full 8 MiB flash dump; its findings are under "Full flash dump"
+and they resolved the per-unit data blocker for a TFTP-recovery install (see
+"Installation method"). That install worked, and later images were installed
+with `sysupgrade`. Verified on the device: boot, Ethernet (SSH and LuCI on the
+single port), 2.4 GHz Wi-Fi (in client mode), the modem's USB functions, and
+LTE data through the modem helper, including automatic reconnection.
 
 ## Device identity and live checks
 
@@ -336,8 +337,8 @@ A first-draft `ramips/mt76x8` target was added:
   (`IMAGE_SIZE := 6720k`, `TPLINK_FLASHLAYOUT := 8Mmtk`).
 - `mt76x8/base-files/etc/board.d/02_network` — single `eth0` LAN (switch
   registered with VLANs disabled, as on other single-port mt76x8 boards), LTE
-  as the standard `wan`/`wan6` on `wwan0` (DHCP over RNDIS).
-- `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `wwan0`; LAN
+  as the standard `wan`/`wan6` on `usb0` (DHCP over RNDIS).
+- `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `usb0`; LAN
   LED as a switch-link trigger on port 4 (mask `0x10`).
 - `mt76x8/base-files/etc/init.d/mercusys-modem` and
   `mt76x8/base-files/usr/libexec/mercusys-modem` — a procd service, active
@@ -356,16 +357,18 @@ Design choices and their basis:
   leaves the modem in RNDIS mode (`AT+QCFG="usbnet",3`), so `rndis_host` is the
   driver expected on first boot. `cdc_ether` is kept for ECM mode
   (`"usbnet",1`).
-- **Modem interface named `wwan0`.** The live stock system (2026-11-05)
-  shows the modem as USB `2c7c:6005`, bound to `rndis_host` and `option`, with
-  a locally administered MAC on its network interface. In this tree's kernel
-  (6.12, OpenWrt v25.12.6; the same holds on main's 6.18), `rndis_host`
-  matches `2c7c:6005` to `asr_rndis_info` (OpenWrt patch
-  `781-usb-net-rndis-support-asr.patch`), which sets
-  `FLAG_WWAN`, and usbnet always names such devices `wwan%d`. The MB130-4G's
-  `eth1` therefore does not apply while the modem is in RNDIS mode. If the
-  modem is switched to ECM (`"usbnet",1`), `cdc_ether` binds it instead and
-  the name changes.
+- **Modem interface named `usb0`** (observed on OpenWrt v25.12.6,
+  2026-11-06: `rndis_host 1-1:1.0 usb0: ... RNDIS device`). The modem is USB
+  `2c7c:6005`; interface 0 (class `e0/01/03`) and 1 bind to `rndis_host`,
+  interfaces 2–4 to `option`. OpenWrt's
+  `781-usb-net-rndis-support-asr.patch` does add `2c7c:6005` with
+  `asr_rndis_info` (`FLAG_WWAN`, which would name it `wwan0`), but inserts it
+  after the generic `USB_INTERFACE_INFO(USB_CLASS_WIRELESS_CONTROLLER, 1, 3)`
+  entry. The first match wins, so the generic `rndis_info` binds and the
+  device gets the default `usb%d` name. (Main's 6.18 patch has the same
+  order.) The Cudy LT500 Outdoor in this tree also uses `usb0`. If the modem
+  is switched to ECM (`"usbnet",1`), `cdc_ether` binds it instead and the name
+  may change.
 - **Ethernet on switch port 4 only** (`mediatek,portdisable = <0x2f>`). On
   the running stock firmware, `/proc/mt7628/esw_cnt` showed traffic only on
   port 4. The link register (`0x10110080` = `0xa180a110`) had the port 4 link
@@ -393,8 +396,12 @@ The included driver set is correct for the hardware: `kmod-mt7603` + `kmod-mt76`
 (2.4 GHz WMAC), and `kmod-usb2` / `kmod-usb-net-rndis` /
 `kmod-usb-net-cdc-ether` / `kmod-usb-serial-option` / `kmod-usb-serial-wwan`
 for the EC200A modem (RNDIS as left by stock, or ECM, plus AT control).
-**Not** verified: any on-device behaviour (boot, modem bring-up, Ethernet,
-Wi-Fi, LTE, LEDs).
+On-device results (2026-11-06): boot, Ethernet, Wi-Fi client mode, the
+modem's `rndis_host`/`option` functions and LTE data work, and all LED
+devices register under their DTS names. Not yet checked: the label MAC on
+each interface, the radio's calibration and range, Wi-Fi access-point
+operation, the visual state of each LED, the reset button under OpenWrt,
+and the modem power/antenna lines.
 
 The images are build-host artifacts and are not committed to the repository.
 
@@ -407,15 +414,16 @@ The images are build-host artifacts and are not committed to the repository.
    GPIO driver (see "GPIO findings"). They are expected to be correct, but no
    pin has been observed on hardware.
 3. **Switch port** for the single Ethernet connector is port 4, observed on
-   the running stock firmware; untested under OpenWrt.
+   the running stock firmware; confirmed under OpenWrt (SSH, LuCI and TFTP
+   recovery all work through it).
 4. **Reset button** is GPIO 38, active-low, read by both the stock kernel and
    U-Boot.
 5. **First-flash method:** a per-unit TFTP-recovery image (see "Installation
-   method") is the only known path that preserves the unique data. It is
-   untested.
-6. **Modem network interface name** is `wwan0`, derived from the live USB ID
-   and the kernel's driver table (see "Design choices"). It has not yet been
-   observed under OpenWrt.
+   method") is the only known path that preserves the unique data. It worked
+   on the owner's unit on 2026-11-06.
+6. **Modem network interface name** is `usb0`, observed under OpenWrt (see
+   "Design choices"). An earlier reading of the driver table predicted
+   `wwan0`; that was wrong.
 
 ## Installation method
 
@@ -507,20 +515,24 @@ Procedure, derived from the dumped bootloader:
    to reboot. OpenWrt then answers at `192.168.1.1`.
 
 `config`/`configbak` are restored to their state when the dump was taken.
-That only matters if you later return to stock firmware. This path has not
-been tested on hardware. The dump's integrity check covers only `0x0`–`0x6b0000`;
+That only matters if you later return to stock firmware. This path worked on
+the owner's unit (2026-11-06), served by the macOS built-in TFTP server
+(`/private/tftpboot`, `launchctl load -F /System/Library/LaunchDaemons/tftp.plist`;
+the file must be world-readable while served, and should be removed afterwards
+because it holds per-unit data). After that, upgrade with `sysupgrade` from
+OpenWrt instead. The dump's integrity check covers only `0x0`–`0x6b0000`;
 the per-unit region is additionally confirmed by matching per-partition MD5
 sums from the live system. Re-check those sums immediately before flashing,
 in case stock firmware has changed `config` since.
 
 ## Remaining software work
 
-The hardware port gives OpenWrt the modem's network interface (`wwan0`), its
-AT ports (`option`, interfaces 2–4, which become `ttyUSB0`–`ttyUSB2`), and the
-LEDs. The stock firmware does more in userspace. This section records what
-stock does and what OpenWrt needs. The LTE data call and the signal LEDs are
-now implemented by the modem helper service below, untested on hardware.
-SMS, USSD and network selection are not implemented.
+The hardware port gives OpenWrt the modem's network interface (`usb0`), its
+AT ports (`option`, interfaces 2–4, which become `ttyUSB0`–`ttyUSB2`,
+confirmed on OpenWrt), and the LEDs. The stock firmware does more in
+userspace. This section records what stock does and what OpenWrt needs. The
+LTE data call and the signal LEDs are implemented by the modem helper service
+below. SMS, USSD and network selection are not implemented.
 
 ### Modem helper service
 
@@ -530,24 +542,34 @@ procd respawn, only on `mercusys,mb118-4g-v1`. Every 15 s it:
 1. Finds the AT port by USB interface number (interface 3, the stock
    firmware's AT port), not by `ttyUSB` index. If no port is present, it
    turns the signal LEDs off and retries.
-2. If `wan` is the default setup (`proto dhcp`, `device wwan0`, not
-   disabled), it queries `AT+QNETDEVCTL?`. When the last field is not 1, it
-   reads `AT+CGDCONT?`, picks the first context with a non-empty, non-IMS APN
-   (2 with the stock profile, falling back to 1) and sends
-   `AT+QNETDEVCTL=1,<cid>,1`. State changes are logged with tag
-   `mercusys-modem`. If `wan` is switched to another protocol (for example
-   `ncm`, to set a custom APN) or disabled, it stops dialling and leaves the
-   modem alone.
+2. If `wan` is the default setup (`proto dhcp`, `device usb0`, not
+   disabled), it reads `AT+CGDCONT?` and picks the first context with a
+   non-empty, non-IMS APN (2 with the stock profile). If none can be read, it
+   does not dial. It then queries `AT+QNETDEVCTL?`. Unless the link is up
+   (last field 1) on that context, it disconnects any other context, sends
+   `AT+CGACT=1,<cid>` and `AT+QNETDEVCTL=1,<cid>,1`, and on `OK` signals
+   `udhcpc` (SIGUSR1) to restart DHCP discovery on `wan`. State changes are
+   logged with tag `mercusys-modem`. If `wan` is switched to another protocol
+   (for example `ncm`, to set a custom APN) or disabled, it stops dialling
+   and leaves the modem alone.
 3. Sets `green:signal1`–`green:signal3` from `AT+CESQ` RSRP (≥ −95 dBm → 3,
    ≥ −105 → 2, ≥ −115 → 1), or from `AT+CSQ` (≥ 20 / ≥ 12 / ≥ 5) when RSRP is
    unknown.
 
 It never writes the APN or any other stored modem setting. AT commands go
-through `gcom` with `/etc/gcom/runcommand.gcom`, serialized with `flock`.
-`ttyUSB2` stays free for users and tools such as `sms-tool`. The parsers are
-tested against the replies captured from this modem (context selection,
-link state, signal levels, CRLF), under both macOS `sh` and BusyBox `ash`.
-None of it has run on the device.
+through `gcom` with `/usr/share/mercusys-modem/at.gcom`, serialized with
+`flock`. comgt's own `/etc/gcom/runcommand.gcom` cannot be used: it only
+reports success or failure and never prints the modem's reply (comgt's
+received-character echo is commented out), so a first version of the helper
+parsed nothing and fell back to dialling context 1. `at.gcom` instead
+captures everything the modem sends for 2 s after the command. `ttyUSB2`
+stays free for users and tools such as `sms-tool`.
+
+Testing: the parsers and the connect sequence (with a stubbed AT transport)
+are tested against replies captured from this modem under OpenWrt, under
+both macOS `sh` and BusyBox `ash`; the real `gcom` with `at.gcom` was also run
+against a fake EC200A on a pty. The manual AT sequence the helper performs
+was confirmed on the device (see "LTE data connection").
 
 ### Space budget
 
@@ -555,6 +577,9 @@ The current sysupgrade payload, including `comgt` and the helper service, is
 `0x520004` bytes (about 5.1 MiB) of the `0x690000`-byte firmware partition on
 v25.12.6 (it was `0x560004` on SNAPSHOT with kernel 6.18).
 That leaves about 1.44 MiB for the JFFS2
+overlay. A build from source does not include the LuCI web interface unless
+`CONFIG_PACKAGE_luci=y` is set (release images get it from the build-server
+config); with LuCI the payload is `0x580004` bytes, leaving about 1.06 MiB for the
 overlay, which holds both configuration and any installed packages. Anything
 substantial should be built into the image rather than installed with `apk`,
 and the image must still pass `check-size`. ModemManager
@@ -589,10 +614,22 @@ What stock does (from strings in `/usr/bin/cos` and `/usr/bin/mobile`):
   passes the carrier addressing through, with IPv6 by SLAAC.
 
 What OpenWrt does with the current port: `wan` (DHCP) and `wan6` (DHCPv6/RA)
-on `wwan0`. If the modem does not start a data call by itself after power-up,
-`wwan0` links up but DHCP gets no reply. Whether it auto-connects without
-`cos` is **unknown**; check it before writing code (see "Data still to
-collect").
+on `usb0`. Observed on the device on 2026-11-06:
+
+- The modem does **not** bring up its internet context by itself without
+  the stock daemon. Only context 1 (the network's default LTE bearer,
+  IPv6-only, not listed by `AT+CGDCONT?`) and context 8 (IMS) are active
+  (`AT+CGACT?`), and context 2 has no address.
+- `usb0` links up, but DHCP gets no reply until a context is linked to the
+  network interface.
+- `AT+QNETDEVCTL=1,2,1` fails with `+CME ERROR: 0` while context 2 is
+  inactive. `AT+CGACT=1,2` (→ `OK`) followed by `AT+QNETDEVCTL=1,2,1`
+  (→ `OK`) gives `+QNETDEVCTL: 1,2,1,1`, and DHCP on `usb0` then returns the
+  carrier's CGNAT address (`100.64.0.0/10` range, /8 mask).
+- `AT+QNETDEVCTL=0,1,1` (disconnect context 1) answered `ERROR`, yet the
+  link state afterwards was `0,0,0,0`.
+- Registration: `+CEREG: 0,1` (home), `+COPS: 0,0,"<operator>",7` (LTE),
+  `+CPIN: READY`.
 
 The helper service above implements the dial step. The in-tree `ncm`
 protocol (`comgt-ncm`) has a generic `quectel` entry, which connects with
@@ -608,7 +645,7 @@ It remains the way to set a custom APN: set `wan` to `proto ncm`,
 
 The original design notes for a dial step follow:
 
-1. A procd init script, or a hotplug script on the `wwan0` add event. It
+1. A procd init script, or a hotplug script on the `usb0` add event. It
    waits for the AT port, then sends
    `AT+CGDCONT=<cid>,"IPV4V6","<apn>"` (only if an APN is configured;
    the stock profile already uses cid 2), then `AT+CPIN="<pin>"` (only if
@@ -630,19 +667,18 @@ The original design notes for a dial step follow:
 
 A cleaner long-term option is a netifd protocol handler, for example
 `proto quectel-rndis`, modelled on `uqmi`'s `qmi.sh`. It would run the dial
-in `proto_setup` and then hand `wwan0` to DHCP. That is more code, but it is
+in `proto_setup` and then hand `usb0` to DHCP. That is more code, but it is
 how upstream would expect it to be integrated.
 
 Open questions:
 - AT ports: on the running stock firmware the `mobile` daemon holds
   `/dev/ttyUSB1` (USB interface 3), and `/dev/ttyUSB2` (interface 4) also
-  answers AT commands. Use `ttyUSB2` for scripts, so they do not contend
-  with anything else that opens `ttyUSB1`. Under OpenWrt, interfaces 2–4
-  should likewise become `ttyUSB0`–`ttyUSB2`; confirm on first boot. The role
-  of `ttyUSB0` is unconfirmed.
-- Whether the modem reconnects by itself after a power cycle without the
-  stock daemon. Check with `AT+QNETDEVCTL?` on the first OpenWrt boot; until
-  then, assume a dial step is required.
+  answers AT commands. Under OpenWrt, interfaces 2–4 become
+  `ttyUSB0`–`ttyUSB2` (confirmed); the helper uses interface 3 (`ttyUSB1`),
+  leaving `ttyUSB2` for interactive use. The role of `ttyUSB0` is
+  unconfirmed.
+- Resolved: the modem does not reconnect its internet context by itself
+  without the stock daemon (see above), so the dial step is required.
 - Whether the modem's NAT mode (`"nat",1`) interferes with IPv6 or with
   bridging. The evidence suggests it does not: `mobile_cli get_rt_param`
   showed the router receiving the carrier's own addressing (CGNAT IPv4
@@ -674,7 +710,7 @@ vendor behaviour exactly.
 
 The stock kernel also has an `led_lte` control, but its write handler only
 records a mode. No separate LTE LED GPIO was found in the GPIO table, so the
-internet LED (GPIO 44, `netdev` on `wwan0`) covers that role.
+internet LED (GPIO 44, `netdev` on `usb0`) covers that role.
 
 ### SMS, USSD and network selection (stock web UI features)
 
@@ -689,7 +725,7 @@ OpenWrt options:
   a third-party feed, and space-checked.
 - Network selection, band locking and scan modes need only raw AT commands.
   They can be scripted, but have no UI.
-- Data-usage statistics: `vnstat`/`nlbwmon` can count `wwan0`, at an
+- Data-usage statistics: `vnstat`/`nlbwmon` can count `usb0`, at an
   additional space cost.
 
 None of this is required to boot or route. All of it is required for parity

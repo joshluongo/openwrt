@@ -340,11 +340,10 @@ A first-draft `ramips/mt76x8` target was added:
   as the standard `wan`/`wan6` on `usb0` (DHCP over RNDIS).
 - `mt76x8/base-files/etc/board.d/01_leds` — internet LED bound to `usb0`; LAN
   LED as a switch-link trigger on port 4 (mask `0x10`).
-- `mt76x8/base-files/etc/init.d/mercusys-modem` and
-  `mt76x8/base-files/usr/libexec/mercusys-modem` — a procd service, active
-  only on this board, that starts the LTE data call and drives the signal
-  LEDs (see "Modem helper service"). `comgt` is added to `DEVICE_PACKAGES`
-  for its `gcom` AT-command tool.
+- The modem helper (LTE data call, signal LEDs) is **not** part of the image.
+  It ships in the separate `luci-app-modem-lite` package, built from its own
+  feed (see "Modem helper service"). Without that package the modem is not
+  dialled and `wan` gets no address.
 
 Design choices and their basis:
 
@@ -532,50 +531,53 @@ The hardware port gives OpenWrt the modem's network interface (`usb0`), its
 AT ports (`option`, interfaces 2–4, which become `ttyUSB0`–`ttyUSB2`,
 confirmed on OpenWrt), and the LEDs. The stock firmware does more in
 userspace. This section records what stock does and what OpenWrt needs. The
-LTE data call and the signal LEDs are implemented by the modem helper service
-below. SMS, USSD and network selection are not implemented.
+LTE data call, the signal LEDs, APN/PIN settings and SMS are implemented by
+the `luci-app-modem-lite` package below. USSD and network selection are not
+implemented.
 
 ### Modem helper service
 
-`/usr/libexec/mercusys-modem`, started by `/etc/init.d/mercusys-modem` with
-procd respawn, only on `mercusys,mb118-4g-v1`. Every 15 s it:
+The helper lives outside this tree, in the `luci-app-modem-lite` package
+(its own feed: add `src-link modemlite <path>` to `feeds.conf`, then
+`./scripts/feeds install luci-app-modem-lite`). Select it with
+`CONFIG_PACKAGE_luci-app-modem-lite=y` to build it into the image, or install
+the built `.apk` afterwards. It depends on `sms-tool`, which is its only AT
+transport; `comgt` is no longer needed. Its daemon,
+`/usr/libexec/modem-lite/modemd` (procd service `modem-lite`), polls every
+15 s (configurable) and:
 
 1. Finds the AT port by USB interface number (interface 3, the stock
    firmware's AT port), not by `ttyUSB` index. If no port is present, it
    turns the signal LEDs off and retries.
-2. If `wan` is the default setup (`proto dhcp`, `device usb0`, not
-   disabled), it reads `AT+CGDCONT?` and picks the first context with a
-   non-empty, non-IMS APN (2 with the stock profile). If none can be read, it
-   does not dial. It then queries `AT+QNETDEVCTL?`. Unless the link is up
-   (last field 1) on that context, it disconnects any other context, sends
-   `AT+CGACT=1,<cid>` and `AT+QNETDEVCTL=1,<cid>,1`, and on `OK` signals
-   `udhcpc` (SIGUSR1) to restart DHCP discovery on `wan`. State changes are
-   logged with tag `mercusys-modem`. If `wan` is switched to another protocol
-   (for example `ncm`, to set a custom APN) or disabled, it stops dialling
-   and leaves the modem alone.
+2. If `wan` is `proto dhcp` on the modem's own network interface (`usb0`)
+   and not disabled, it reads `AT+CGDCONT?` and picks the first context with
+   a non-empty, non-IMS APN (2 with the stock profile). It then queries
+   `AT+QNETDEVCTL?`. Unless the link is up (last field 1) on that context, it
+   disconnects any other context, sends `AT+CGACT=1,<cid>` and
+   `AT+QNETDEVCTL=1,<cid>,1`, and on `OK` signals `udhcpc` (SIGUSR1). If
+   `wan` is switched to another protocol or disabled, it leaves the modem
+   alone. State changes are logged with tag `modem-lite`.
 3. Sets `green:signal1`–`green:signal3` from `AT+CESQ` RSRP (≥ −95 dBm → 3,
    ≥ −105 → 2, ≥ −115 → 1), or from `AT+CSQ` (≥ 20 / ≥ 12 / ≥ 5) when RSRP is
    unknown.
+4. Writes the APN only if one is configured in `/etc/config/modem-lite`
+   (`AT+QICSGP`, falling back to `AT+CGDCONT`/`AT+CGAUTH`), once per change;
+   enters a configured SIM PIN at most once per boot.
+5. Forwards new SMS (read from interface 4, `ttyUSB2`) to a Slack webhook
+   when enabled.
 
-It never writes the APN or any other stored modem setting. AT commands go
-through `gcom` with `/usr/share/mercusys-modem/at.gcom`, serialized with
-`flock`. comgt's own `/etc/gcom/runcommand.gcom` cannot be used: it only
-reports success or failure and never prints the modem's reply (comgt's
-received-character echo is commented out), so a first version of the helper
-parsed nothing and fell back to dialling context 1. `at.gcom` instead
-captures everything the modem sends for 2 s after the command. `ttyUSB2`
-stays free for users and tools such as `sms-tool`.
+Its LuCI pages are *Network → Mobile Modem* (signal, status, APN and modem
+settings) and *SMS* (inbox, send, Slack forwarding).
 
-Testing: the parsers and the connect sequence (with a stubbed AT transport)
-are tested against replies captured from this modem under OpenWrt, under
-both macOS `sh` and BusyBox `ash`; the real `gcom` with `at.gcom` was also run
-against a fake EC200A on a pty. The manual AT sequence the helper performs
-was confirmed on the device (see "LTE data connection").
+An earlier in-tree shell helper used `gcom` with a custom script that waited
+a fixed 2 s per command; comgt's own `runcommand.gcom` never prints the
+modem's reply. `sms_tool at` returns as soon as the modem answers `OK` or
+`ERROR`.
 
 ### Space budget
 
-The current sysupgrade payload, including `comgt` and the helper service, is
-`0x520004` bytes (about 5.1 MiB) of the `0x690000`-byte firmware partition on
+The sysupgrade payload measured with `comgt` and the former in-tree helper
+was `0x520004` bytes (about 5.1 MiB) of the `0x690000`-byte firmware partition on
 v25.12.6 (it was `0x560004` on SNAPSHOT with kernel 6.18).
 That leaves about 1.44 MiB for the JFFS2
 overlay. A build from source does not include the LuCI web interface unless
@@ -721,9 +723,9 @@ manual or automatic network selection (`AT+COPS`), band locking
 
 OpenWrt options:
 - `sms-tool` covers SMS read/send/delete, USSD and raw AT commands from the
-  shell. Its packages-feed LuCI front-end, `luci-app-sms-tool`, was not found
-  in this tree's feeds. Any LuCI page would have to be written or taken from
-  a third-party feed, and space-checked.
+  shell. The out-of-tree `luci-app-modem-lite` package (see "Modem helper
+  service") uses it for an SMS inbox, sending (single GSM 7-bit messages)
+  and forwarding to Slack.
 - Network selection, band locking and scan modes need only raw AT commands.
   They can be scripted, but have no UI.
 - Data-usage statistics: `vnstat`/`nlbwmon` can count `usb0`, at an

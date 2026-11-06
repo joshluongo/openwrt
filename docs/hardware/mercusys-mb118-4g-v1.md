@@ -359,7 +359,9 @@ Design choices and their basis:
 - **Modem interface named `wwan0`.** The live stock system (2026-11-05)
   shows the modem as USB `2c7c:6005`, bound to `rndis_host` and `option`, with
   a locally administered MAC on its network interface. In this tree's kernel
-  (6.18), `rndis_host` matches `2c7c:6005` to `asr_rndis_info`, which sets
+  (6.12, OpenWrt v25.12.6; the same holds on main's 6.18), `rndis_host`
+  matches `2c7c:6005` to `asr_rndis_info` (OpenWrt patch
+  `781-usb-net-rndis-support-asr.patch`), which sets
   `FLAG_WWAN`, and usbnet always names such devices `wwan%d`. The MB130-4G's
   `eth1` therefore does not apply while the modem is in RNDIS mode. If the
   modem is switched to ECM (`"usbnet",1`), `cdc_ether` binds it instead and
@@ -371,12 +373,14 @@ Design choices and their basis:
 
 Verified so far: file/shell/DTS syntax, layout arithmetic, and name
 consistency across DTS, recipe and board.d; **and a full toolchain image build**
-(ramips/mt76x8, SNAPSHOT) completed on an x86_64 Ubuntu host. The build produced:
+(ramips/mt76x8) completed on an x86_64 Ubuntu host, first on SNAPSHOT and
+again on the OpenWrt v25.12.6 release (`r33311-981c978eff`, kernel 6.12.112).
+The v25.12.6 build produced:
 
 | Image | Size | Purpose |
 | --- | --- | --- |
-| `...-squashfs-sysupgrade.bin` | 5440 KiB | Upgrade from a running OpenWrt |
-| `...-initramfs-kernel.bin` | 5398 KiB | RAM-only boot (no verified way to load it yet; see "Recovery discrepancy") |
+| `...-squashfs-sysupgrade.bin` | 5249 KiB | Upgrade from a running OpenWrt |
+| `...-initramfs-kernel.bin` | 5199 KiB | RAM-only boot (no verified way to load it yet; see "Recovery discrepancy") |
 
 That first build also produced a `tftp-recovery.bin`; it was removed from the
 recipe because it would erase the calibration/MAC partitions (see
@@ -548,10 +552,11 @@ None of it has run on the device.
 ### Space budget
 
 The current sysupgrade payload, including `comgt` and the helper service, is
-`0x560004` bytes (about 5.4 MiB) of the `0x690000`-byte firmware partition.
-That leaves about 1.19 MiB for the JFFS2
+`0x520004` bytes (about 5.1 MiB) of the `0x690000`-byte firmware partition on
+v25.12.6 (it was `0x560004` on SNAPSHOT with kernel 6.18).
+That leaves about 1.44 MiB for the JFFS2
 overlay, which holds both configuration and any installed packages. Anything
-substantial should be built into the image rather than installed with `opkg`,
+substantial should be built into the image rather than installed with `apk`,
 and the image must still pass `check-size`. ModemManager
 (`feeds/packages/net/modemmanager`, plus GLib, D-Bus, libqmi and libmbim)
 does not fit. A small shell script using AT commands is the realistic

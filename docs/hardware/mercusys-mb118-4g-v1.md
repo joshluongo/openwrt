@@ -398,8 +398,9 @@ The included driver set is correct for the hardware: `kmod-mt7603` + `kmod-mt76`
 for the EC200A modem (RNDIS as left by stock, or ECM, plus AT control).
 On-device results (2026-11-06): boot, Ethernet, Wi-Fi client mode, the
 modem's `rndis_host`/`option` functions and LTE data work, and all LED
-devices register under their DTS names. Not yet checked: the label MAC on
-each interface, the radio's calibration and range, Wi-Fi access-point
+devices register under their DTS names, and the Wi-Fi MAC matches the
+owner's expectation for the label. Not yet checked: the Ethernet MAC, the
+radio's calibration and range, Wi-Fi access-point
 operation, the visual state of each LED, the reset button under OpenWrt,
 and the modem power/antenna lines.
 
@@ -408,8 +409,8 @@ The images are build-host artifacts and are not committed to the repository.
 ### Assumptions that require on-device confirmation
 
 1. **MAC/EEPROM offsets** (`romfile` `0xf100`, `radio` `0x0`) are confirmed
-   from the flash dump; first boot should still show the label MAC and a
-   calibrated radio.
+   from the flash dump. On OpenWrt the Wi-Fi MAC is correct; the Ethernet MAC
+   and the radio calibration have not been checked yet.
 2. **GPIO polarity and modem line levels** come from disassembly of the stock
    GPIO driver (see "GPIO findings"). They are expected to be correct, but no
    pin has been observed on hardware.
